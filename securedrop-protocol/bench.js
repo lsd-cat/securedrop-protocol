@@ -358,69 +358,6 @@ function makeTable(headers, rows) {
   const outRoot = path.join(cfg.out, stamp());
   ensureDir(outRoot);
 
-  // Banner to confirm parameters
-  logInfo(`Params locked: n=${cfg.iterations}, k=${cfg.k}, j=${cfg.j}, rng=${cfg.rng}, mode=${cfg.mode}`);
-
-  // Start static server
-  const { server, port } = await startServer(cfg.root);
-  const baseUrl = `http://localhost:${port}/www/index.html`;
-  logInfo(`Static server @ ${baseUrl}`);
-
-  // Native (optional)
-  let native = null;
-  if (cfg.native === 'on') {
-    logInfo('Running native...');
-    try {
-      native = await runNative(cfg.iterations, cfg.k, cfg.j, cfg.rng === 'on');
-
-      const nativeRows = [];
-      for (const op of ['encrypt','decrypt_journalist','decrypt_source','fetch']) {
-        const rec = native?.[op];
-        if (rec) {
-          const s = prettyStatsFromUs(rec.samples_us || []);
-          nativeRows.push([
-            op,
-            rec.iterations ?? cfg.iterations,
-            (op === 'decrypt_journalist' ? (rec.keybundles ?? '—') : '—'),
-            (rec.challenges ?? '—'),
-            s.avg_ms.toFixed(3),
-            s.p50_ms.toFixed(3),
-            s.p90_ms.toFixed(3),
-            s.p99_ms.toFixed(3),
-            s.max_ms.toFixed(3),
-          ]);
-        }
-      }
-
-      if (nativeRows.length) {
-        console.log('\n' + makeTable(
-          ['op','iters','k','j','avg (ms)','p50','p90','p99','max'],
-          nativeRows
-        ));
-      } else {
-        logWarn('Native bench parsed no results.');
-      }
-    } catch (e) {
-      logWarn('Native bench failed:', e.message);
-    }
-  }
-
-  if (cfg.browser === 'none') {
-    logWarn('Browsers disabled (--browser none). Done.');
-    server.close();
-    return;
-  }
-
-  const specs = defaultSpecs(cfg.iterations, cfg.k, cfg.j, cfg.rng === 'on');
-  const flavors = expandFlavors(cfg.browser, cfg.flavors);
-
-  if (flavors.length === 0) {
-    logWarn('No flavors selected.');
-    server.close();
-    return;
-  }
-
-  // CSV writer for per-iteration tidy data (store µs)
   const csvWriter = createObjectCsvWriter({
     path: path.join(outRoot, 'all_samples.csv'),
     header: [
@@ -437,6 +374,106 @@ function makeTable(headers, rows) {
     ],
     append: false,
   });
+
+  // Banner to confirm parameters
+  logInfo(`Params locked: n=${cfg.iterations}, k=${cfg.k}, j=${cfg.j}, rng=${cfg.rng}, mode=${cfg.mode}`);
+
+  // Start static server
+  const { server, port } = await startServer(cfg.root);
+  const baseUrl = `http://localhost:${port}/www/index.html`;
+  logInfo(`Static server @ ${baseUrl}`);
+
+  // Native (optional)
+  let native = null;
+  if (cfg.native === 'on') {
+    logInfo('Running native...');
+    try {
+      native = await runNative(cfg.iterations, cfg.k, cfg.j, cfg.rng === 'on');
+
+      if (!native || Object.keys(native).length === 0) {
+        logWarn('Native bench parsed no results.');
+      } else {
+
+        const nativeBundle = {
+          flavor: { family: 'native', label: 'native' },
+          version: 'N/A',
+          coi: true,
+          benches: native
+        };
+
+        const nativeJsonPath = path.join(outRoot, 'native.json');
+        fs.writeFileSync(nativeJsonPath, JSON.stringify(nativeBundle, null, 2));
+        logInfo(`Saved ${nativeJsonPath}`);
+
+        const nativeRows = [];
+
+        for (const bench of Object.keys(native)) {
+          const rec = native[bench];
+          const samples = rec.samples_us || [];
+
+          samples.forEach((us, i) => {
+            nativeRows.push({
+              family: 'native',
+              label: 'native',
+              browser_version: 'N/A',
+              coi: true,
+              bench,
+              iter_index: i,
+              sample_us: us,
+              iterations: rec.iterations ?? '',
+              keybundles: rec.keybundles ?? '',
+              challenges: rec.challenges ?? '',
+            });
+          });
+        }
+
+        await csvWriter.writeRecords(nativeRows);
+
+        const prettyTable = [];
+        for (const op of ['encrypt','decrypt_journalist','decrypt_source','fetch']) {
+          const rec = native?.[op];
+          if (!rec) continue;
+
+          const s = prettyStatsFromUs(rec.samples_us || []);
+
+          prettyTable.push([
+            op,
+            rec.iterations ?? cfg.iterations,
+            (op === 'decrypt_journalist' ? (rec.keybundles ?? '—') : '—'),
+            (rec.challenges ?? '—'),
+            s.avg_ms.toFixed(3),
+            s.p50_ms.toFixed(3),
+            s.p90_ms.toFixed(3),
+            s.p99_ms.toFixed(3),
+            s.max_ms.toFixed(3),
+          ]);
+        }
+
+        if (prettyTable.length) {
+          console.log('\n' + makeTable(
+            ['op','iters','k','j','avg (ms)','p50','p90','p99','max'],
+            prettyTable
+          ));
+        }
+      }
+    } catch (e) {
+      logWarn('Native bench failed:', e.message);
+    }
+  }
+  if (cfg.browser === 'none') {
+    logWarn('Browsers disabled (--browser none). Done.');
+    server.close();
+    return;
+  }
+
+  const specs = defaultSpecs(cfg.iterations, cfg.k, cfg.j, cfg.rng === 'on');
+  const flavors = expandFlavors(cfg.browser, cfg.flavors);
+
+  if (flavors.length === 0) {
+    logWarn('No flavors selected.');
+    server.close();
+    return;
+  }
 
   // store a traditional summary for per-flavor tables, and build a pivot for the final table
   const pivot = new Map(); // flavorKey -> { encrypt: "1.234 (x2.00)", decrypt_journalist: "...", decrypt_source: "...", fetch: "..." }
